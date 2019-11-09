@@ -1,0 +1,15 @@
+# build docker container and start it
+docker build . -t data-science && docker run --rm -ti -p 8080:8080 data-science
+
+# log into docker container
+docker exec -it `docker ps | tail -n 1 | cut -c 1-12` bash
+
+# stop docker container
+docker stop -t 0 `docker ps | tail -n 1 | cut -c 1-12`
+
+# get server logs
+docker logs `docker ps | tail -n 1 | cut -c 1-12`
+
+# deploy to production
+heroku container:login
+heroku container:push web --app pa-r-abox

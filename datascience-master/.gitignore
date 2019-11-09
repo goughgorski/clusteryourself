@@ -1,0 +1,9 @@
+data_pipeline/pipeline_logs/
+offer_doc.txt
+.DS_Store
+data_pipeline/events-20190111_101638.csv
+data_pipeline/etl_log_files/*.txt
+data_pipeline/psql_pipeline_functions/prod_db_new_table_create.sql
+data_pipeline/psql_pipeline_functions/prod_db_new_table_create_int.sql
+data_pipeline/psql_pipeline_functions/prod_db_new_table_create_stg_tables.sql
+data_pipeline/public_prod_schema_new_table_names.txt

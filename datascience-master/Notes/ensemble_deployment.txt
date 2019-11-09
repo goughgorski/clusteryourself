@@ -1,0 +1,21 @@
+1. create project branch on local machine
+
+git checkout -b [project_branch_name]
+
+2. prepare to write models, ensemble, and model transforms to database
+
+check for database changes that will need to be made (new enum values, new columns, etc.)
+
+3. modify Par-a-box R environment scripts, if necessary to load new model(s)
+
+Rserv.conf, load_active_models.R, load_model_transforms.R
+
+4. test classifier function in local R environment
+
+set up the environment by manually running Rserv.conf script line by line (exclude 'eval' command at the beginning of each line)
+
+5. deploy project branch to heroku app
+
+6. merge project branch to master
+
+classifier function to /functions folder, model script to /scripts folder, any changes to existing scripts (Rserv.conf, etc.)

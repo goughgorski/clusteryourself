@@ -1,0 +1,10 @@
+parabox_packages <- c("base64enc"
+                    ,"futile.logger"
+                    ,"jsonlite"
+                    ,"lazyeval"         
+                    ,"plyr"         
+                    ,"dplyr"
+                    ,"RPostgreSQL"
+                    ,"httr"
+                    ,"igraph"
+                    )
