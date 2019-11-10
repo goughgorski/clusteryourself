@@ -18,7 +18,7 @@ thresh_iter <- function(min, max, by, data, pred, outcome, keep = TRUE, maxstat 
           dFPR <- c(diff(out$false_positive_rate), 0)
           dTPR <- c(diff(out$sensitivity), 0)
           auc <- sum(out$sensitivity * dFPR) + sum(dTPR * dFPR)/2
-          auc <- rep(auc,max)
+          auc <- rep(auc,nrow(out))
           out <- cbind(out, auc)
         }
       } else{
