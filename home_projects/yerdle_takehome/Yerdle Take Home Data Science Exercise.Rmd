@@ -1,0 +1,282 @@
+---
+title: "Yerdle Take Home DS Exercise"
+output: html_document
+---
+Adam Gorski
+
+<style>
+div.blue pre { background-color:lightblue; }
+div.blue pre.r { background-color:lightgray; }
+</style>
+
+### Load necessary packages, connect to data source, load data###
+<div class = "blue">
+```{r setup, warning = F, message = F}
+library(rJava)
+library(RJDBC)
+library(plyr)
+library(dplyr)
+library(pscl)
+library(reshape2)
+library(knitr)
+library(rmarkdown)
+```
+```{r echo=T, results='hide'}
+URL <- 'https://s3.amazonaws.com/athena-downloads/drivers/AthenaJDBC41-1.1.0.jar'
+fil <- basename(URL)
+if (!file.exists(fil)) download.file(URL, fil)
+drv <- JDBC(driverClass="com.amazonaws.athena.jdbc.AthenaDriver", fil, identifier.quote="'")
+con <- jdbcConnection <- dbConnect(drv, 'jdbc:awsathena://athena.us-west-1.amazonaws.com:443/',
+                                   s3_staging_dir="s3://clusteryourself-home-projects.amazonaws.com",
+                                   user=Sys.getenv("ATHENA_ACCESS_KEY_ID"),
+                                   password=Sys.getenv("ATHENA_SECRET_ACCESS_KEY"))
+
+setMethod("dbGetQuery", signature(conn="JDBCConnection", statement="character"),  def=function(conn, statement, ...) {
+  r <- dbSendQuery(conn, statement, ...)
+  on.exit(.jcall(r@stat, "V", "close"))
+  if (conn@jc %instanceof% "com.amazonaws.athena.jdbc.AthenaConnection") fetch(r, -1, 999) # Athena can only pull 999 rows at a time
+  else fetch(r, -1)
+})
+
+items <- dbGetQuery(con, "SELECT * FROM takehome.yerdle_item_data")
+views <- dbGetQuery(con, "SELECT * FROM takehome.yerdle_pageviews")
+```
+
+### Initial data exploration ###
+
+```{r}
+plot(items$msrp_new, items$used_list_price, xlab = 'msrp_new', ylab = 'used_list_price')
+```
+```{r eval=FALSE, include=TRUE}
+table(items$used_condition)
+table(items$category)
+table(items$department)
+table(is.na(items$last_known_retail_price_new))/nrow(items)
+table(items$first_ordered_date == '')/nrow(items) 
+```
+100% `OK` condition
+
+23 categories: Appliances, Bags, etc.
+
+7 departments: Furniture, Kitchen and Dining, etc.
+
+45% of items were discounted while new
+
+31% of items were not sold
+
+### Formatting and modifying variables for modeling ###
+
+```{r}
+factor_vars <- c('used_condition', 'department', 'category', 'color')
+for (i in 1:length(factor_vars)) {items[, factor_vars[i]] <- as.factor(items[, factor_vars[i]])}
+items$first_ordered_date <- ifelse(items$first_ordered_date == '', NA, items$first_ordered_date)
+items$first_approved_date <- as.Date(items$first_approved_date)
+items$first_ordered_date <- as.Date(items$first_ordered_date)
+```
+I transform `used_condition`, `department`, `category`, and `color` into factor variables, and I modify some of the other variables.
+```{r}
+items$furniture_flg <- ifelse(items$department %in% c('Furniture', 'Kids Furniture', 'Outdoor Furniture'), 1, 0)
+items$kids_flg <- ifelse(items$department %in% c('Kids Furniture', 'Kids Storage'), 1, 0)
+items$outdoor_flg <- ifelse(items$department %in% c('Outdoor Furniture', 'Outdoor Storage'), 1, 0)
+items$storage_flg <- ifelse(items$department %in% c('Kids Storage', 'Outdoor Storage', 'Storage'), 1, 0)
+items$kitchen_flg <- ifelse(items$department == 'Kitchen and Dining', 1, 0)
+```
+For the `department` variable, I create flags for the overlapping departments.
+```{r}
+items$perc_msrp <- items$used_list_price/items$msrp_new
+items$days_on_market <- items$first_ordered_date - items$first_approved_date
+items$days_on_market <- ifelse(is.na(items$days_on_market), as.Date('2018-11-01') -
+                                 items$first_approved_date, items$days_on_market)
+items$sold <- ifelse(is.na(items$first_ordered_date), 0, 1)
+items$discount <- ifelse(is.na(items$last_known_retail_price_new), 0, 1)
+```
+Here I create some new variables: 
+
+`perc_msrp` = % of MSRP of the used list price
+
+`days_on_market` = number of days on market before sold; if not sold, number of days on market before max date of the dataset (2018/11/01)
+
+`sold` = flag whether item was sold
+
+`discount` = flag whether the item was offered at a discounted price while new.
+```{r}
+views$pp_scaled <- scale(views$pageviews)
+items <- merge(items, views[, c('item_parent_sku', 'pp_scaled')], by = 'item_parent_sku', all.x = T)
+```
+I scaled the pageviews for the `item_parent_sku` and imported the scaled values into the `items` dataset.
+
+### Estimate revenue function ###
+
+```{r}
+d <- 1
+items$rev1 <- (1/((items$days_on_market/d) + 1)) * items$used_list_price * items$sold
+```
+Without no available storage cost information, I created a flexible relationship between revenue and inventory storage:
+
+`rev1` = (1/((days_on_market/d) + 1)) * used_list_price * sold, `d` = 1
+
+This function discounts the value of an item based on how long it takes to sell. When `d` = 1, an item is discounted by half on its second day in inventory compared to its first. Increasing `d` reduces an item's discount rate, meaning its value depreciates more slowly as it spends time in inventory. 
+
+Below I estimate the model with `d` = 1, which will bias my results towards items that sell quickly.
+
+### Define train, test, and validation sets ###
+```{r}
+sets <- data.frame(unique_item_id = unique(items$unique_item_id), rand = runif(length(unique(items$unique_item_id))))
+sets$set <- ifelse(sets$rand < 0.7, 'train', ifelse(sets$rand >= 0.9, 'validation', 'test'))
+items <- merge(items, sets[, c('unique_item_id', 'set')], by = 'unique_item_id')
+```
+Here I define train, test, and validation sets for model evaluation.
+
+### Zero-inflated negative binomial regression for modeling risk ###
+
+```{r}
+rev1_zeroinfl <- zeroinfl(round(rev1*100) ~ 
+                            perc_msrp + discount + pp_scaled + furniture_flg +
+                            kids_flg + outdoor_flg + storage_flg
+                          , data = items[items$set == 'train',]
+                          , dist = 'negbin', EM = TRUE, na.action = na.omit)
+```
+`rev1` = 0 when the item is not sold, so the distribution is skewed right and has large number of `0` values. A zero-inflated negative binomial approach allows for the combination of modeling the probability of a `0` value and the predicted count. The model's righthand side variables:
+
+price: `perc_msrp`, `discount`
+
+demand: `pp_scaled`
+
+item type: `furniture_flg`, `kids_flg`, `outdoor_flg`, `storage_flg`
+
+```{r}
+summary(rev1_zeroinfl)
+```
+
+### Model evaluation ###
+
+```{r}
+count_coef_mat <- t(as.data.frame(rev1_zeroinfl$coefficients$count))
+train <- items$set == 'train' & complete.cases(items[, colnames(count_coef_mat)[2:length(colnames(count_coef_mat))]])
+model_performance <- data.frame(pred = rev1_zeroinfl$fitted[train],
+                                outcome_flg = items$sold[train],
+                                outcome = items$rev1[train])
+model_performance <- model_performance[!is.na(model_performance$pred),]
+```
+```{r include=FALSE}
+thresh_iter <- function(min, max, by, data, pred, outcome, keep = TRUE, maxstat = NULL) {
+  #Loop over thresholds and output the two class stats 
+  for (i in seq(from = min, to = max, by = by)) {
+    #In iteration 1 create and store output
+    if (i == min) {
+      out <- two_class_stats(data,pred,outcome,i)
+    } else {
+      #In iteration >1 output to temp 
+      out_temp <- two_class_stats(data,pred,outcome,i)
+      #If keep is set we want all output, so rbind
+      if (keep == TRUE) {
+        out <- rbind(out, out_temp) 
+        #If we're at the end, compute AUC
+        if (i == max) {
+          #Compute AUC
+          out <- out[order(out$threshold, decreasing=TRUE),]
+          dFPR <- c(diff(out$false_positive_rate), 0)
+          dTPR <- c(diff(out$sensitivity), 0)
+          auc <- sum(out$sensitivity * dFPR) + sum(dTPR * dFPR)/2
+          auc <- rep(auc,nrow(out))
+          out <- cbind(out, auc)
+        }
+      } else{
+        #If keep is set to FALSE, kep the record with the maxstat
+        if (out[,maxstat]<out_temp[,maxstat]) {
+          out <- out_temp
+        }
+      }
+    }
+  }
+  return(out)
+}
+two_class_stats <- function(data, pred, outcome, threshold, na.rm = TRUE, custom_F_beta = NULL) {
+  cat('\r',threshold)
+  data$pred_class <- ifelse(data[,pred]>=threshold,1,0)
+  sensitivity <- sum(data[data$pred_class == data[,outcome] & data[,outcome] == 1,outcome], na.rm = na.rm)/sum(data[,outcome], na.rm = na.rm)
+  specificity <- sum(1-data[data$pred_class == data[,outcome] & data[,outcome] == 0,outcome], na.rm = na.rm)/sum(1-data[,outcome], na.rm = na.rm)
+  accuracy <- sum(ifelse(data$pred_class == data[,outcome],1,0), na.rm = na.rm)/sum(!is.na(data[,outcome]), na.rm = na.rm)
+  inverse_distance <- 1-(sqrt((1-sensitivity)^2 + (1-specificity)^2))
+  positive_pred_val <- sum(data[data$pred_class == data[,outcome] & data[,outcome] == 1,outcome], na.rm = na.rm)/sum(data$pred_class, na.rm = na.rm)
+  negative_pred_val <- sum(1-data[data$pred_class == data[,outcome] & data[,outcome] == 0,outcome], na.rm = na.rm)/sum(1-data$pred_class, na.rm = na.rm)
+  false_positive_rate <- 1-specificity
+  false_negative_rate <- 1-sensitivity
+  positive_likelihood_ratio <- sensitivity/false_positive_rate
+  negative_likelihood_ratio <- false_negative_rate/specificity
+  f1 <- (1+1^2)*((sensitivity*positive_pred_val)/((1^2)*sensitivity+positive_pred_val))
+  f2 <- (1+2^2)*((sensitivity*positive_pred_val)/((2^2)*sensitivity+positive_pred_val))
+  fp5 <- (1+.5^2)*((sensitivity*positive_pred_val)/((.5^2)*sensitivity+positive_pred_val))
+  output <- cbind.data.frame(threshold,accuracy,sensitivity,specificity,positive_pred_val,negative_pred_val,false_positive_rate,false_negative_rate,positive_likelihood_ratio,negative_likelihood_ratio,inverse_distance,f1,f2,fp5)
+  return(output)
+}
+```
+```{r, echo = T, results = F}
+model_thresh <- thresh_iter(0, 3000, 1, model_performance, 'pred', 'outcome_flg')
+```
+Note: model evalution `thresh_iter` function is internally developed
+```{r}
+model_thresh[which.max(model_thresh$f2),]
+```
+If we consider the model solely on its ability to predict whether an item sold, it performs reasonably well. AUC = 0.52. A threshold to maximize f2 has a high degree of accuracy, correctly predicting a sale for 72% of items. However, the assignment called for an approach to maximize revenue across sales and inventory storage, which we'll return to.
+
+Note: AUC and Accuracy will be slightly different in the text than the output. All model outputs change slightly every time `train` designation is reassigned, which occurs each time the file is converted to HTML.
+
+### Model performance on test data ###
+```{r}
+test <- items$set == 'test' & complete.cases(items[, colnames(count_coef_mat)[2:length(colnames(count_coef_mat))]])
+count_pred <- as.matrix(data.frame(Intercept = 1, items[test, colnames(count_coef_mat)[2:ncol(count_coef_mat)]]))
+
+count_pred <- count_pred %*% rev1_zeroinfl$coefficients$count
+zero_coef_mat <- t(as.data.frame(rev1_zeroinfl$coefficients$zero))
+zero_pred <- as.matrix(data.frame(Intercept = 1, items[test, colnames(count_coef_mat)[2:ncol(count_coef_mat)]]))
+zero_pred <- zero_pred %*% rev1_zeroinfl$coefficients$zero
+
+pzero <- exp(zero_pred)/(1+exp(zero_pred))
+pcount <- exp(count_pred)*(1-pzero)
+items$pred_rev1[test] <- pcount/100
+
+model_performance <- data.frame(pred = items$pred_rev1[test],
+                                outcome_flg = items$sold[test],
+                                outcome = items$rev1[test])
+model_performance <- model_performance[!is.na(model_performance$pred),]
+```
+```{r echo=T, results='hide'}
+model_thresh <- thresh_iter(0, 3000, 1, model_performance, 'pred', 'outcome_flg')
+```
+```{r}
+model_thresh[which.max(model_thresh$f2),]
+```
+Here I use the model parameters to calculate a classifer for the `test` dataset and evaluate the performance of the predicted value. On the test data, the model performs well. AUC = 0.68 and Accuracy = 0.69.
+
+### Analyze for systematic underselling (in sold products) ###
+```{r}
+items$resid[items$sold == 1] <- items$pred_rev1[items$sold == 1] - items$rev1[items$sold == 1]
+
+for (i in seq(from = floor(min(items$pp_scaled[test])), 
+              to = max(items$pp_scaled[test]), by = 2)) {
+  if (i == floor(min(items$pp_scaled[test]))) {
+    z <- test & items$pp_scaled > i & items$pp_scaled <= i + 2
+    pp <- as.numeric(by(items$resid[z], items$department[z], function(x) {mean(x, na.rm = T)}))
+    ct <- as.numeric(by(items$resid[z], items$department[z], length))
+                  mat <- data.frame(min_pp_scaled = i, max_pp_scaled = i + 2, vws_mean = pp, ct = ct,
+                                    department = levels(items$department))}
+  else {
+    z <- test & items$pp_scaled > i & items$pp_scaled <= i + 2
+    pp <- as.numeric(by(items$resid[z], items$department[z], function(x) {mean(x, na.rm = T)}))
+    ct <- as.numeric(by(items$resid[z], items$department[z], length))
+        tmp <- data.frame(min_pp_scaled = i, max_pp_scaled = i + 2, vws_mean = pp, ct = ct, department = levels(items$department))
+        mat <- rbind(mat, tmp)
+  }}
+mat <- mat[!is.na(mat$ct) & mat$ct > 30,]
+
+dcast(mat, min_pp_scaled + max_pp_scaled ~ department, value.var = 'vws_mean')
+```
+Using the predicted values from the model, I examine whether there are systematic differences between predicted and actual values of the `rev1` function values for the `test` dataset. To incorporate dynamic demand, I evaluated the mean residuals across two dimensions: `department` and `pp_scaled` (scaled parent sku pageviews). Doing so produces something like a heatmap (above), where  `Kitchen and Dining` items belonging to highly viewed (9+ standard deviations above mean) parent sku groups are systemically overvalued by the model. The overvaluation indicates that these items are not producing as much value as the model predicts. Therefore, I chose to start with these items for pricing recommendations.
+
+### Pricing strategy improvement recommendation ###
+
+Start with the sku groups in `Kitchen and Dining` where the pageviews are 9 or more standard deviations above the mean. These are generally items that sell for nearly 100% of MSRP but stay in inventory for a long period of time. Conduct A/B experiments where the price for the items in the treatment group decreases incrementally to see if turnover is improved compared to the control group. If so, consider dynamically aligning pageviews to price (% of MSRP) to further increase sales volume.
+
+Keep in mind that the `rev1` function is biased towards selling products quickly. A different function with a decreased discount rate (1/`d`) will produce results more inclined towards revenue maximization rather than decreasing inventory storage. Further work would be needed to align this function with actual inventory costs. 
+</div>
