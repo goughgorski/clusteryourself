@@ -36,8 +36,8 @@ s3_to_R_setup
 
 		# R commands to unlock Java
 		Sys.setenv(JAVA_HOME = "/Library/Java/JavaVirtualMachines/jdk1.8.0_231.jdk/Contents/Home")
-		Sys.setenv(ATHENA_ACCESS_KEY_ID = "AKIAJRFPIBRNR6424D4Q")
-		Sys.setenv(ATHENA_SECRET_ACCESS_KEY = "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")
+		Sys.setenv(ATHENA_ACCESS_KEY_ID = [see notes])
+		Sys.setenv(ATHENA_SECRET_ACCESS_KEY = [see notes])
 
 		# R commands to connect to Athena
 		library(rJava)
