@@ -1,0 +1,63 @@
+s3_to_R_setup
+
+## 1. Upload file to s3
+	# use AWS console (****need to find command line solution)
+		# https://signin.aws.amazon.com/
+		# email: adam.g.gorski@gmail.com
+	# 'clusteryourself-home-projects' is primary bucket
+		# create folder for new project, subfolder for each file
+
+## 2. Convert file into db table in Athena
+	# in dbeaver, ensure connection to Athena
+		# credentials here: https://console.aws.amazon.com/iam/home?region=us-west-1#/security_credentials
+			# Access keys tab
+	# write new table:
+	CREATE EXTERNAL TABLE IF NOT EXISTS schema.new_table (
+	  `column_name` data type
+	)
+	ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'
+	WITH SERDEPROPERTIES (
+	  'serialization.format' = ',',
+	  'field.delim' = ','
+	) LOCATION 's3://clusteryourself-home-projects/project_folder/file_subfolder/'
+	TBLPROPERTIES ('skip.header.line.count'='1');
+		# very finicky with data types
+
+## 3. Connect R session to Athena
+	# this is dependent on functional Java, which has been scrambled by the Catalina OS update
+
+		# Unix command to reset java
+		sudo R CMD javareconf
+
+		# Unix command to switch jdk file
+		install_name_tool -change /Library/Java/JavaVirtualMachines/jdk-11.0.1.jdk/Contents/Home/lib/server/libjvm.dylib \
+		/Library/Java/JavaVirtualMachines/jdk1.8.0_231.jdk/Contents/Home/jre/lib/server/libjvm.dylib \
+		/Library/Frameworks/R.framework/Versions/3.6/Resources/library/rJava/libs/rJava.so
+
+		# R commands to unlock Java
+		Sys.setenv(JAVA_HOME = "/Library/Java/JavaVirtualMachines/jdk1.8.0_231.jdk/Contents/Home")
+		Sys.setenv(ATHENA_ACCESS_KEY_ID = "AKIAJRFPIBRNR6424D4Q")
+		Sys.setenv(ATHENA_SECRET_ACCESS_KEY = "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")
+
+		# R commands to connect to Athena
+		library(rJava)
+		library(RJDBC)
+
+		URL <- 'https://s3.amazonaws.com/athena-downloads/drivers/AthenaJDBC41-1.1.0.jar'
+		fil <- basename(URL)
+		if (!file.exists(fil)) download.file(URL, fil)
+		drv <- JDBC(driverClass="com.amazonaws.athena.jdbc.AthenaDriver", fil, identifier.quote="'")
+		con <- jdbcConnection <- dbConnect(drv, 'jdbc:awsathena://athena.us-west-1.amazonaws.com:443/',
+		                                   s3_staging_dir="s3://clusteryourself-home-projects.amazonaws.com",
+		                                   user=Sys.getenv("ATHENA_ACCESS_KEY_ID"),
+		                                   password=Sys.getenv("ATHENA_SECRET_ACCESS_KEY"))
+
+		#allows for more than 999 rows to be queried at once
+		setMethod("dbGetQuery", signature(conn="JDBCConnection", statement="character"),  def=function(conn, statement, ...) {
+		  r <- dbSendQuery(conn, statement, ...)
+		  on.exit(.jcall(r@stat, "V", "close"))
+		  if (conn@jc %instanceof% "com.amazonaws.athena.jdbc.AthenaConnection") fetch(r, -1, 999) # Athena can only pull 999 rows at a time
+		  else fetch(r, -1)
+		})
+
+		# After all that, you should be able to run basic dbGetQuery commands to pull data
