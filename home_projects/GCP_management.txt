@@ -1,0 +1,56 @@
+GCP management
+
+All products/services (data storage, databases, AI tools) live within a project.
+
+	- USF Project name: functionally conceptual
+
+Data storage: accessed on Storage tab on console, follows bucket/folder/file(s) structure
+
+	- USF files: baseline-assumption/don-econ/[course, ie, econ_621]/[file name]
+
+Database: accessed on SQL tab on console, follows instance/database structure
+* instance has public IP address and connection name
+* connection to the instance connects to all databases
+
+	- USF database: don-econ
+
+Connecting to database
+1. Find your public IP address: 'get my IP' google query will return it
+
+2. In SQL instance, go to Connections tab and add that IP address as an authorized network. That will allow connections from that IP address.
+
+3. In external app (eg, dBeaver), create a user account with user name and password
+* CREATE USER [user name] WITH PASSWORD '[password]'
+* DO NOT CREATE NEW USER IN GCP CONSOLE - default creates superuser
+
+4. Grant new user schema usage and table privileges
+* GRANT USAGE ON SCHEMA [schema] TO [user name]
+* GRANT [privilege, eg, SELECT] ON TABLE [table] TO [user name]
+
+5. Enter connection settings for external connection (dBeaver, RStudio, etc.)
+* Host: instance's public IP address
+* Database: database name (not including instance name)
+* Port: 5432
+* User: user name
+* Password: password
+
+	- USF connection settings:
+	* Host: 35.230.7.96
+	* Database: don-econ
+	* Port: 5432
+	* User: usfstudent
+	* Password: dons
+
+Adding data to database
+1. Create empty data table column structure in database, based on the existing data
+
+2. Strip the data of column headers
+
+3. Go to storage and upload data to appropriate bucket/folder from local
+
+4. Go to instance and import; choose destination database and table
+
+5. Refresh data table in external app to make sure data is there
+
+6. Add privileges for data table
+* GRANT [privilege, eg, SELECT] ON TABLE [table] TO [user name]
